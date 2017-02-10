@@ -41,6 +41,7 @@
 | teradata_to_redshift.py   | replicates given teradata SQL to redshift table (incrementally or full copy/replace)      | Run                                              |
 | typeform_to_redshift.py   | replicates all data from typeform responses to a redshift table (full copy/replace)       | Run                                              |
 | zendesk_to_redshift.py    | extracts users,orgs,tickets,ticket_events from zendesk to redshift (partially incremental)| Run                                              |
+| gsheet_to_hadoop.py       | replicates all data from a google sheet to a hive table (full copy/replace) via Spark   | Run                                              |
 
 * Example to start the luigi scheduler daemon
 ```
