@@ -60,8 +60,11 @@
 # your luigi.cfg must point to that json file
 import sys
 import json
-from pyspark.sql import SparkSession
-from pyspark.sql import SQLContext
+try:
+    from pyspark.sql import SparkSession
+    from pyspark.sql.types import *
+except:
+    print('This is a spark app, please use this on the hadoop cluster...')
 import luigi
 import pandas as pd
 from oauth2client.client import SignedJwtAssertionCredentials
@@ -97,7 +100,7 @@ if __name__ == '__main__':
     data = [l for l in data if l != header]
 
     df = pd.DataFrame(data, columns=header)
-    df_spark = sqlContext.createDataFrame(df)
+    df_spark = spark.createDataFrame(df)
 
     sqlContext.sql("USE {0}".format(db))
     df_spark.registerTempTable('{0}_temp'.format(table))
