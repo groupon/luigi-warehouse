@@ -35,12 +35,14 @@
 | File                      | Description                                                                               | Main Class(es)                                   |
 | ------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------ |
 | gsheet_to_redshift.py     | replicates all data from a google sheet to a redshift table (full copy/replace)           | Run                                              |
+| gsheet_to_hadoop.py     | replicates all data from a google sheet to a hadoop hive table via spark (full copy/replace)           | Run                                              |
 | postgres_to_redshift.py   | replicates postgres tables to redshift (incrementally or full copy/replace)               | Run              - PerformIncrementalImport PerformFullImport |
 | postgres_to_hadoop.py     | spark app that replicates postgres tables to hadoop(hive) (incrementally or copy/replace) | Run              - RunIncremental RunFromScratch |
 | salesforce_to_redshift.py | replicates a salesforce report or SOQL to a redshift table(full copy/replace)             | SOQLtoRedshift ReporttoRedshift                  |
 | teradata_to_redshift.py   | replicates given teradata SQL to redshift table (incrementally or full copy/replace)      | Run                                              |
 | typeform_to_redshift.py   | replicates all data from typeform responses to a redshift table (full copy/replace)       | Run                                              |
 | zendesk_to_redshift.py    | extracts users,orgs,tickets,ticket_events from zendesk to redshift (partially incremental)| Run                                              |
+| zendesk_to_hadoop.py    | generic class to extract from zendesk API and load to hadoop hive via spark (incrementally or full copy/replace) | ZendeskSpark                                              |
 | gsheet_to_hadoop.py       | replicates all data from a google sheet to a hive table (full copy/replace) via Spark   | Run                                              |
 
 * Example to start the luigi scheduler daemon
