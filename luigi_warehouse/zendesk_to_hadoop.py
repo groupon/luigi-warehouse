@@ -200,6 +200,10 @@ class ZendeskSpark(luigi.ExternalTask):
         self.table_delete("{0}_reconcile_zendesk".format(self.table))
   
     def run(self):
+        if (self.incremental) & (not self.table_exists()):
+            # if it's an incremental load and the table doesn't exist yet
+            # do the same task but non-incrementally
+            yield getattr(sys.modules[__name__],self.__class__.__name__)(table=self.table, primary_key=self.primary_key, timestamp_field=self.timestamp_field, incremental=False) #Build the incremental table from scratch if it does not exist
         self.read()
         self.write()
         self.output().done()
