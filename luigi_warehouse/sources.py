@@ -37,10 +37,11 @@ import datetime
 import calendar
 import json
 import csv
+import xml
+from xml.dom import minidom
 import re
 import urllib
 from multiprocessing import Pool, Process
-from xml.dom import minidom
 from html import escape
 import luigi
 from luigi.s3 import S3Client
@@ -48,7 +49,7 @@ from django.utils.encoding import smart_str
 import numpy as np
 import requests
 import pandas as pd
-
+import sqlite3
 ##############################################################################
 # Database APIs
     # - each class has two exposed methods
@@ -970,6 +971,284 @@ class AppBoy:
         return segments
 
 
+class SalesforceBulk:
+    def __init__(self, username=None, password=None, security_token=None, sqlite_directory='jobtracker.sqlite'):
+        import sqlite3 # used for storing running jobs via the bulk api
+        self.username = username
+        self.password = password + security_token
+        self.security_token = security_token
+        self.sqlitedirectory = sqlite_directory
+        self.init_sqlite()
+        self.sessiondetails = self.login(self.username,self.password)
+        if self.sessiondetails:
+            self.instance = self.sessiondetails['instance']
+            self.sessionId = self.sessiondetails['sessionId']
+            self.expirytime = datetime.datetime.now() + datetime.timedelta(seconds=int(self.sessiondetails['sessionSecondsValid']) - 60)
+        else:
+            print('Unable to Authenticate with Salesforce')
+
+    def init_sqlite(self):
+        self.conn = sqlite3.connect(self.sqlitedirectory)
+        self.lc = self.conn.cursor()
+        try:
+            self.lc.execute('select * from jobs') #Check jobs table has been initialised
+        except sqlite3.OperationalError:
+            #If not create table
+            self.lc.execute('create table jobs(jobid varchar(20),state varchar(100),created_at varchar(40),operation varchar(100),object varchar(100))')
+            self.conn.commit()
+
+    @property
+    def login_string(self):
+        return """<?xml version="1.0" encoding="utf-8" ?>
+                  <env:Envelope xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                      xmlns:env="http://schemas.xmlsoap.org/soap/envelope/">
+                    <env:Body>
+                      <n1:login xmlns:n1="urn:partner.soap.sforce.com">
+                        <n1:username>{username}</n1:username>
+                        <n1:password>{password}</n1:password>
+                      </n1:login>
+                    </env:Body>
+                  </env:Envelope>"""
+
+    @property
+    def job_string(self):
+        return """<?xml version="1.0" encoding="UTF-8"?>
+                    <jobInfo
+                        xmlns="http://www.force.com/2009/06/asyncapi/dataload">
+                      <operation>{operation}</operation>
+                      <object>{object}</object>
+                      <concurrencyMode>{concurrency}</concurrencyMode>
+                      <contentType>{contenttype}</contentType>
+                    </jobInfo>"""
+
+    @property
+    def close_job_string(self):
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <jobInfo xmlns="http://www.force.com/2009/06/asyncapi/dataload">
+                  <state>Closed</state>
+                </jobInfo>"""
+
+    @property
+    def query_results_string(self):
+        return """
+                <result-list xmlns="http://www.force.com/2009/06/asyncapi/dataload">
+                <result>{resultid}</result>
+                </result-list>
+                """
+
+    def createloginSOAP(self, username, password):
+        return self.login_string.format(username=username,password=password)
+
+    def createjobstring(self, operation, object,concurrency="Parallel",contenttype="CSV"):
+        return self.job_string.format(operation=operation,object=object,concurrency=concurrency,contenttype=contenttype)
+
+    def createresultstring(self, resultid):
+        return self.query_results_string.format(resultid=resultid) 
+
+    def getXMLData(self, xmlstring, tagName):
+        #XML Parser
+        q = xmlstring.split('<'+tagName+'>')
+        if len(q)> 1:
+            return q[1].split('</'+tagName+'>')[0]
+        else:
+            return None
+
+    def login(self, username, password):
+        #Returns a dictionary of metadata retrieved from authenticating with Salesforce bulk api
+        request = self.createloginSOAP(username, password)
+        session_details = {} 
+        encoded_request = request.encode('utf-8')
+        url = "https://login.salesforce.com/services/Soap/u/30.0"
+        headers = {"Content-Type": "text/xml; charset=UTF-8",
+                   "SOAPAction": "login"}
+        response = requests.post(url=url,
+                                 headers = headers,
+                                 data = encoded_request,
+                                 verify=True)
+        if self.getXMLData(response.text,'faultstring'):
+            print(self.getXMLData(response.text,'faultstring'))
+            return None
+        session_details['sessionId'] = self.getXMLData(response.text,'sessionId')
+        session_details['passwordExpired'] = self.getXMLData(response.text,'passwordExpired')
+        session_details['sessionSecondsValid'] = self.getXMLData(response.text,'sessionSecondsValid')
+        serverURL = self.getXMLData(response.text,'serverUrl')
+        session_details['instance'] = serverURL[8:serverURL.find('.salesforce.com')]
+        return session_details
+
+    def isExpired(self):
+        if self.expirytime > datetime.datetime.now():
+            return False
+        else:
+            return True
+
+    def refreshToken(self):
+        self.sessiondetails = self.login(self.username,self.password)
+        self.sessionId = self.sessiondetails['sessionID']
+        self.expirytime = datetime.datetime.now() + datetime.timedelta(seconds=self.sessiondetails['sessionSecondsValid'] - 60)
+
+    def getheaders(self,content_type="application/xml; charset=UTF-8"):
+        if self.isExpired():
+            self.refreshToken()
+        headers = {"X-SFDC-Session": self.sessionId, 
+                     "Content-Type": content_type}
+        return headers
+
+    def __repr__(self):
+        if self.sessionId:
+            return str(self.sessionId)
+        else:
+            return 'Unable to authenticate with Salesforce. Check settings file'
+
+
+class SalesforceBulkJob(SalesforceBulk):
+    def __init__(self, username=None, password=None, security_token=None, sqlite_directory='jobtracker.sqlite', operation=None, object=None, jobid=None):
+        import sqlite3 # used for storing running jobs via the bulk api
+        self.username = username
+        self.password = password 
+        self.security_token = security_token
+        self.sqlitedirectory = sqlite_directory
+        self.init_sqlite()
+        self.sessiondetails = self.login(self.username,self.password)
+        if self.sessiondetails:
+            self.instance = self.sessiondetails['instance']
+            self.sessionId = self.sessiondetails['sessionId']
+            self.expirytime = datetime.datetime.now() + datetime.timedelta(seconds=int(self.sessiondetails['sessionSecondsValid']) - 60)
+        else:
+            print('Unable to Authenticate with Salesforce')
+        
+        self.operation=operation
+        self.object=object
+        self.jobid=jobid
+        self.init_job()
+
+    def init_job(self):
+        #Create new job
+        if not self.jobid:
+            postdata = self.createjobstring(operation=self.operation
+                                           ,object=self.object
+                                           ,concurrency="Parallel"
+                                           ,contenttype="CSV")
+            postdata = postdata.encode('utf-8')
+            url = "https://" + self.instance + ".salesforce.com/services/async/30.0/job"
+            self.batches = {}       
+            headers = self.getheaders()
+                                       
+            response = requests.post(url=url,headers=headers,data=postdata,verify=True)
+            self.updateSelf(response.text)
+            insertstr = "insert into jobs values('%s','%s','%s','%s','%s')" % (self.jobid,self.state,self.createdDT,self.operation,self.object)
+            self.lc.execute(insertstr)
+            self.conn.commit()
+        #Retrieve old job. Once Job ID is passed, all the regular Job attributes of the old job are updated
+        else:
+            self.updateSelf(self.getJobUpdate())
+
+    def updateSelf(self, xml_response_text):
+        self.jobid = self.getXMLData(xml_response_text,'id')
+        self.createdby = self.getXMLData(xml_response_text,'createdById')
+        self.createdDT = self.getXMLData(xml_response_text,'createdDate')
+        self.numberBatchesQueued = self.getXMLData(xml_response_text,'numberBatchesQueued')
+        self.numberBatchesInProgress = self.getXMLData(xml_response_text,'numberBatchesInProgress')
+        self.numberBatchesCompleted = self.getXMLData(xml_response_text,'numberBatchesCompleted')
+        self.numberBatchesFailed = self.getXMLData(xml_response_text,'numberBatchesFailed')
+        self.numberBatchesTotal = self.getXMLData(xml_response_text,'numberBatchesTotal')
+        self.state = self.getXMLData(xml_response_text,'state')
+        self.numberRecordsProcessed = self.getXMLData(xml_response_text,'numberRecordsProcessed')
+        self.numberRetries = self.getXMLData(xml_response_text,'numberRetries')
+        self.operation = self.getXMLData(xml_response_text,'operation')
+        self.apiVersion = self.getXMLData(xml_response_text,'apiVersion')
+        self.numberRecordsFailed = self.getXMLData(xml_response_text,'numberRecordsFailed')
+        self.totalProcessingTime = self.getXMLData(xml_response_text,'totalProcessingTime')
+        self.apiActiveProcessingTime = self.getXMLData(xml_response_text,'apiActiveProcessingTime')
+        self.apexProcessingTime = self.getXMLData(xml_response_text,'apexProcessingTime')
+        self.jobInfo = self.getXMLData(xml_response_text,'jobInfo')
+        self.operation = self.getXMLData(xml_response_text,'operation')
+        self.object = self.getXMLData(xml_response_text,'object')
+        return None
+
+    def addbatch(self,postdata):
+        url = "https://" + self.instance + ".salesforce.com/services/async/30.0/job/{jobid}/batch".format(jobid=self.jobid)
+        # headers = {"X-SFDC-Session": session.sessionId, 
+        #            "Content-Type": "text/csv; charset=UTF-8"}
+        headers = self.getheaders('text/csv; charset=UTF-8')
+        response = requests.post(url=url,
+                                 headers = headers,
+                                 data = postdata,
+                                 )
+        batchId = self.getXMLData(response.text,'id')
+        self.unfinished_business = True
+        self.batches[batchId] = {}
+        self.batches[batchId]['jobID'] = self.getXMLData(response.text,'jobId')
+        self.batches[batchId]['state'] = self.getXMLData(response.text,'state')
+        self.batches[batchId]['numberRecordsProcessed'] = self.getXMLData(response.text,'numberRecordsProcessed')
+        self.batches[batchId]['numberRecordsFailed'] = self.getXMLData(response.text,'numberRecordsFailed')
+        return response.text
+
+    def getJobUpdate(self):
+        url = "https://{instance}.salesforce.com/services/async/30.0/job/{jobid}".format(instance=self.instance,jobid=self.jobid)
+        headers = self.getheaders()
+        response = requests.get(url=url,headers=headers)
+        return response.text
+
+    def getbatchinfo(self,batchid):
+        url = "https://{instance}.salesforce.com/services/async/30.0/job/{jobid}/batch/{batchid}"
+        headers = self.getheaders()
+        url = url.format(instance=self.instance,jobid=self.jobid,batchid=batchid)
+        response = requests.get(url=url,headers=headers)
+        return response.text
+
+    def updatebatch(self):
+        if self.batches:
+            for key in self.batches:
+                newdata = self.getbatchinfo(key)
+                self.batches[key]['state'] = self.getXMLData(newdata,'state')
+                self.batches[key]['numberRecordsProcessed'] = self.getXMLData(newdata,'numberRecordsProcessed')
+                self.batches[key]['numberRecordsFailed'] = self.getXMLData(newdata,'numberRecordsFailed')
+                if self.getXMLData(newdata,'stateMessage'):
+                    self.batches[key]['stateMessage'] = self.getXMLData(newdata,'stateMessage')
+        return None
+
+    def getresultlists(self,batchid):
+        url = "https://{instance}.salesforce.com/services/async/30.0/job/{jobid}/batch/{batchid}/result"
+        url = url.format(instance=self.instance,jobid=self.jobid,batchid=batchid)
+        headers = self.getheaders()
+        response = requests.get(url=url,headers=headers) # returns results list xml
+        response_expl = response.text.split('<result>')
+        result_list = []
+        for i in range(1, len(response_expl)):
+            result_elem = response_expl[i]
+            result_list.append(result_elem.split('</result>')[0])
+        self.batches[batchid]['results'] = result_list 
+
+    def getresults(self,batchid,resultid):
+        if 'output' not in self.batches[batchid]:
+            self.batches[batchid]['output'] = []
+        url = "https://{instance}.salesforce.com/services/async/30.0/job/{jobid}/batch/{batchid}/result/{resultid}"
+        url = url.format(instance=self.instance,jobid=self.jobid,batchid=batchid,resultid=resultid)
+        print(url)
+        headers = self.getheaders()
+        response = requests.get(url=url,headers=headers)
+        self.batches[batchid]['output'].append(response.text)
+        return response.text
+
+    def closeJob(self):
+        postdata = soaprequests.closeJobString
+        url = "https://" + self.instance + ".salesforce.com/services/async/30.0/job/" + self.jobid
+        headers = self.getheaders()
+        response = requests.post(url=url,headers=headers,data=postdata)
+        if self.getXMLData(response.text,'state') == 'Closed':
+            self.state = 'Closed'
+            updatedb= "update jobs set state = '%s' where jobid = '%s'" % (self.state,self.jobid)
+            self.lc.execute(updatedb)
+            self.conn.commit()
+        return response.text
+
+        def describe(self):
+            description = "ID: {jobid}\nOperation: {operation}\nSalesforce Object: {sfobject}"
+            return description.format(jobid=self.jobid,operation=self.operation,sfobject=self.object)
+
+
 class SalesforceAnalytics:
     def __init__(self, username=None, password=None, security_token=None, sandbox=False, api_version='v29.0'):
         self.username = username
@@ -1176,23 +1455,52 @@ class Salesforce:
         username = luigi.configuration.get_config().get(cfg_name,'username')
         password = luigi.configuration.get_config().get(cfg_name,'password')
         security_token = luigi.configuration.get_config().get(cfg_name,'security_token')
-        host = luigi.configuration.get_config().get(cfg_name,'host')
         self.client_soql = Salesforce(username=username,password=password,security_token=security_token)
         self.client_analytics = SalesforceAnalytics(username=username,password=password,security_token=security_token)
-        self.operators = {'equals':                     '=',
-                                            'not equals':             '!=',
-                                            'less than':                '<',
-                                            'less or equal':        '<=',
-                                            'greater than':         '>',
-                                            'greater or equal': '>=',
-                                            'like':                         'like',
-                                            'in':                             'in',
-                                            'not in':                     'not in'
-                                         }
+        self.client_bulk = SalesforceBulk(username=username, password=password, security_token=security_token)
+        self.operators = {'equals':           '=',
+                          'not equals':       '!=',
+                          'less than':        '<',
+                          'less or equal':    '<=',
+                          'greater than':     '>',
+                          'greater or equal': '>=',
+                          'like':             'like',
+                          'in':               'in',
+                          'not in':           'not in'}
+
+    def query_bulk(self, soql, sf_object, sqlite_directory='jobtracker.sqlite'):
+        job = SalesforceBulkJob(username=self.client_bulk.username, 
+                                password=self.client_bulk.password, 
+                                security_token=self.client_bulk.security_token, 
+                                operation='query', 
+                                object=sf_object)
+        job.addbatch(soql)
+        processing = True
+        attemptnumber = 0
+        #Polling the status of the batches
+        while processing == True:
+            # All batches must have finished to progress
+            attemptnumber += 1
+            time.sleep(10)
+            processing = False
+            print('Refresh number %d' % attemptnumber)
+            job.updatebatch()
+            #Batch info added to the dictionary job.batches with batch ID as the key
+            print(job.batches)
+            for key in job.batches:
+                if job.batches[key]['state'] in ('Queued','InProgress'):
+                    processing = True
+        #Returns a list of the result IDs and adds them to the
+        for key in job.batches:
+            job.getresultlists(key)
+        for key in job.batches:
+            for resultid in job.batches[key]['results']:
+                job.getresults(key,resultid)
+        return [job.batches[k]['output'] for k in job.batches if job.batches[k]['output']]
 
     def query(self, soql):
         '''https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/soql_sosl/sforce_api_calls_soql.htm'''
-        return self.soql_client.query_all(soql)
+        return self.client_soql.query_all(soql)
 
     def query_results(self, soql):
         records = self.query(soql)['records']
@@ -1214,7 +1522,7 @@ class Salesforce:
         return df
 
     def available_objects(self):
-        obj = self.soql_client.describe()
+        obj = self.client_soql.describe()
         obj = obj['sobjects']
         result = []
         for o in obj:
@@ -1222,7 +1530,7 @@ class Salesforce:
         return result
 
     def object_fields(self, object_name):
-        attr = self.soql_client.__getattr__(object_name).describe()
+        attr = self.client_soql.__getattr__(object_name).describe()
         return attr
 
     def object_query_fields(self, object_name):
@@ -1233,15 +1541,15 @@ class Salesforce:
         return [field['name'] for field in fields]
 
     def get_report_id(self, name):
-        result = self.soql_client.query("SELECT Id FROM Report WHERE Name = '{0}'".format(name.replace("'", r"\'")))
+        result = self.client_soql.query("SELECT Id FROM Report WHERE Name = '{0}'".format(name.replace("'", r"\'")))
         result_id = result['records'][0]['Id']
         return result_id
 
     def get_report(self, id, filters=None, details='false'):
         if filters:
             assert isinstance(filters,list),"filters needs to be a list of hashes: [{'value':'test','column':'my_sf_column','operator':'equals'}...]"
-            return self.analytics_client.get_report(id,filters=filters,details=details)
-        return self.analytics_client.get_report(id,details=details)
+            return self.client_analytics.get_report(id,filters=filters,details=details)
+        return self.client_analytics.get_report(id,details=details)
  
     def get_report_results(self, id):
         report = self.get_report(id)

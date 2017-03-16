@@ -102,6 +102,8 @@ $ cp /opt/teradata/client/15.10/odbc_64/odbc.ini ~/.odbc.ini
 
 * Props to [cghall](https://github.com/cghall/salesforce-reporting) for the capability to query salesforce reports directly using the analytics API
 
+* Also available are `SalesforceBulk` and `SalesforceBulkJob` classes which use the Salesforce bulk API
+
 ##### Braintree - [braintree](https://github.com/braintree/braintree_python) : [API Reference](https://developers.braintreepayments.com/)
 
 ##### Typeform - [API Reference](https://www.typeform.com/help/data-api/)
